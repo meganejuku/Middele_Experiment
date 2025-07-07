@@ -1,11 +1,8 @@
-#!/usr/bin/env python3
-
-
-
 import argparse
 import xml.etree.ElementTree as ET
 from pathlib import Path
 import matplotlib.pyplot as plt
+import time 
 import matplotlib.patches as patches
 from PIL import Image  
 import tifffile
@@ -96,37 +93,64 @@ class HSIVOCDataset(torch.utils.data.Dataset):
 
 # ------------------------------- Model --------------------------------
 
-def get_model(num_classes=2, in_channels=51):
+import torch
+import torch.nn as nn
+import torchvision
+from torchvision.models._utils import IntermediateLayerGetter
+from torchvision.models.detection.anchor_utils import AnchorGenerator
+from torchvision.models.detection.faster_rcnn import FasterRCNN, TwoMLPHead
+
+# ── TwoMLPHead に Dropout を追加 ──────────────────────────────
+class TwoMLPHeadWithDropout(TwoMLPHead):
+    def __init__(self, in_channels: int, rep_size: int = 1024, p: float = 0.2):
+        super().__init__(in_channels, rep_size)
+        # 再定義してドロップアウトを挿入
+        self.fc6 = nn.Sequential(
+            nn.Linear(in_channels, rep_size), nn.ReLU(inplace=True), nn.Dropout(p)
+        )
+        self.fc7 = nn.Sequential(
+            nn.Linear(rep_size, rep_size), nn.ReLU(inplace=True), nn.Dropout(p)
+        )
+
+# ── モデル生成関数 ──────────────────────────────────────────
+def get_model(num_classes: int = 2, in_channels: int = 51, p_dropout: float = 0.2):
+    # 1) バックボーン
     if in_channels == 3:
-        # ── RGB: ImageNet の ResNet50 をそのまま ──
-        backbone = resnet50(weights="IMAGENET1K_V2")
-        backbone = IntermediateLayerGetter(backbone, {"layer4": "0"})
-        backbone.out_channels = 2048
-        image_mean = [0.0] * 3
-        image_std  = [1.0] * 3
+        base = torchvision.models.resnet50(weights="IMAGENET1K_V2")
     else:
-        # ── HSI: Conv1 を差し替え ──
-        base = resnet50(weights="IMAGENET1K_V2")
+        base = torchvision.models.resnet50(weights="IMAGENET1K_V2")
         base.conv1 = nn.Conv2d(in_channels, 64, 7, 2, 3, bias=False)
         nn.init.kaiming_normal_(base.conv1.weight, mode="fan_out", nonlinearity="relu")
-        backbone = IntermediateLayerGetter(base, {"layer4": "0"})
-        backbone.out_channels = 2048
-        image_mean = [0.0] * in_channels
-        image_std  = [1.0] * in_channels
 
-    anchor_gen = AnchorGenerator(
-        sizes=((32, 64, 128, 256),),
-        aspect_ratios=((0.5, 1.0, 2.0),)
+    backbone = IntermediateLayerGetter(base, {"layer4": "0"})
+    backbone.out_channels = 2048
+    image_mean = [0.0] * in_channels
+    image_std = [1.0] * in_channels
+
+    # 2) ROI プール後に入るヘッドを差し替え
+    representation_size = 1024
+    box_head = TwoMLPHeadWithDropout(
+        backbone.out_channels * 7 * 7,  # 7×7 プール後
+        representation_size,
+        p=p_dropout,
     )
 
-    model = torchvision.models.detection.FasterRCNN(
+    # 3) RPN のアンカー
+    anchor_gen = AnchorGenerator(
+        sizes=((32, 64, 128, 256),), aspect_ratios=((0.5, 1.0, 2.0),)
+    )
+
+    # 4) Faster-RCNN 本体
+    model = FasterRCNN(
         backbone,
         num_classes=num_classes,
         rpn_anchor_generator=anchor_gen,
+        box_head=box_head,
         image_mean=image_mean,
-        image_std=image_std
+        image_std=image_std,
     )
     return model
+
 
 # ----------------------------- Helpers --------------------------------
 
@@ -225,6 +249,7 @@ def main():
     args = parser.parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    total_t0 = time.perf_counter()
     train_losses, val_losses = [], []
     train_ds = HSIVOCDataset(args.data_root, "train")
     val_ds   = HSIVOCDataset(args.data_root, "val")
@@ -237,17 +262,22 @@ def main():
     optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
                                 momentum=0.9, weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=5, gamma=0.1)
-    accum_steps = 4
+        optimizer, step_size=12, gamma=0.1)
+    accum_steps = 1
     scaler = GradScaler()
     for epoch in range(1, args.epochs + 1):
+        torch.cuda.synchronize(device)
+        ep_t0 = time.perf_counter()
         train_loss = train_one_epoch(model, optimizer, train_loader,
                                     device, scaler, accum_steps)
         val_loss   = valid_one_epoch(model,   val_loader,   device)
         prec, rec, f1 = evaluate(model, val_loader, device)
-        print(f"Epoch {epoch}: train Loss={train_loss:.4f}  "
-                f"Val Loss={val_loss:.4f}  "
-                f"P={prec:.3f}  R={rec:.3f}  F1={f1:.3f}")
+        torch.cuda.synchronize(device)
+        ep_sec = time.perf_counter() - ep_t0
+        print(f"Epoch {epoch}: "
+              f"train Loss={train_loss:.4f}  Val Loss={val_loss:.4f}  "
+              f"P={prec:.3f}  R={rec:.3f}  F1={f1:.3f}  "
+              f"| Time={ep_sec:6.1f}s")
         train_losses.append(train_loss)
         val_losses.append(val_loss)
         scheduler.step()
@@ -255,6 +285,10 @@ def main():
     save_path = Path(args.save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), save_path)
+    torch.cuda.synchronize(device)
+    total_sec = time.perf_counter() - total_t0
+    print(f"Training finished in {total_sec/60:.1f} min "
+          f"({total_sec:.1f} s)")
     print(f"Model saved to {save_path}")
 
     # loss curve

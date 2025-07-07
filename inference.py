@@ -138,7 +138,12 @@ def get_model(num_classes=2, in_channels=51):
 
 def visualize(img_tensor, boxes, scores, save_path):
     arr = img_tensor[:3].permute(1, 2, 0).numpy()
-    arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-6)
+
+    # コントラスト・ストレッチング
+    p2, p98 = np.percentile(arr, (2, 98))
+    arr = np.clip(arr, p2, p98)
+    arr = (arr - p2) / (p98 - p2 + 1e-6)
+
     fig, ax = plt.subplots(1)
     ax.imshow(arr)
     for box, sc in zip(boxes, scores):
