@@ -10,12 +10,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torch.utils.data import DataLoader
-import torchvision
-from torchvision.models import resnet50
-from torchvision.models._utils import IntermediateLayerGetter
 from torch.amp import autocast, GradScaler
 from torchvision.ops import box_iou
-from torchvision.models.detection.rpn import AnchorGenerator
+
 
 # -------------------------------- Data --------------------------------
 
@@ -63,7 +60,7 @@ class HSIVOCDataset(torch.utils.data.Dataset):
 
         # ── ① 拡張子ごとに一覧を作成 ──
         self.files = sorted(p for p in self.img_dir.iterdir()
-                            if p.suffix.lower() in {".tiff", ".tif", ".jpg", ".jpeg", ".png"})
+                            if p.suffix.lower() in {".tiff", ".jpg", ".jpeg", ".png"})
         self.band_mask = band_mask
 
     def __len__(self):
@@ -95,8 +92,6 @@ class HSIVOCDataset(torch.utils.data.Dataset):
 
 import torch
 import torch.nn as nn
-import torchvision
-from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection.faster_rcnn import FasterRCNN, TwoMLPHead
 
@@ -113,43 +108,87 @@ class TwoMLPHeadWithDropout(TwoMLPHead):
         )
 
 # ── モデル生成関数 ──────────────────────────────────────────
-def get_model(num_classes: int = 2, in_channels: int = 51, p_dropout: float = 0.2):
-    # 1) バックボーン
-    if in_channels == 3:
-        base = torchvision.models.resnet50(weights="IMAGENET1K_V2")
-    else:
-        base = torchvision.models.resnet50(weights="IMAGENET1K_V2")
-        base.conv1 = nn.Conv2d(in_channels, 64, 7, 2, 3, bias=False)
-        nn.init.kaiming_normal_(base.conv1.weight, mode="fan_out", nonlinearity="relu")
+import torchvision
+import torch.nn as nn
+from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection.rpn import AnchorGenerator
+from torchvision.models.efficientnet import efficientnet_b3, EfficientNet_B3_Weights
+from torchvision.models._utils import IntermediateLayerGetter
 
-    backbone = IntermediateLayerGetter(base, {"layer4": "0"})
-    backbone.out_channels = 2048
+# TwoMLPHeadWithDropout は既存定義を流用
+# class TwoMLPHeadWithDropout(nn.Module):
+#     ... 
+
+import torch.nn as nn
+import torchvision
+from torchvision.models.efficientnet import efficientnet_b3, EfficientNet_B3_Weights
+from torchvision.models._utils import IntermediateLayerGetter
+from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection.rpn import AnchorGenerator
+
+# 事前に定義済みの TwoMLPHeadWithDropout を使います:
+# class TwoMLPHeadWithDropout(nn.Module):
+#     def __init__(self, in_channels: int, representation_size: int, p: float):
+#         ...
+
+def get_model(
+    num_classes: int = 2,
+    in_channels: int = 51,
+    p_dropout: float = 0.2
+):
+    # ── 1) EfficientNet-B3 をバックボーンにロード ──
+    base = efficientnet_b3(weights=EfficientNet_B3_Weights.IMAGENET1K_V1)
+
+    # HSI対応：入力チャンネル数が3以外なら、最初のConv2dを置き換え
+    if in_channels != 3:
+        orig_conv = base.features[0][0]
+        new_conv = nn.Conv2d(
+            in_channels,
+            orig_conv.out_channels,
+            kernel_size=orig_conv.kernel_size,
+            stride=orig_conv.stride,
+            padding=orig_conv.padding,
+            bias=False
+        )
+        nn.init.kaiming_normal_(new_conv.weight, mode="fan_out", nonlinearity="relu")
+        base.features[0][0] = new_conv
+
+    # ── 2) 特徴抽出部のラッピング ──
+    # base.features モジュールの出力を "0" というキーで取得
+    backbone = IntermediateLayerGetter(base, {"features": "0"})
+    backbone.out_channels = 1536  # EfficientNet-B3 の最終特徴マップチャンネル数
+
+    # 標準的に使う画像正規化パラメータ（バンド数に合わせる）
     image_mean = [0.0] * in_channels
-    image_std = [1.0] * in_channels
+    image_std  = [1.0] * in_channels
 
-    # 2) ROI プール後に入るヘッドを差し替え
+    # ── 3) ROIプール後の Box Head を Dropout付き MLP に置き換え ──
     representation_size = 1024
     box_head = TwoMLPHeadWithDropout(
-        backbone.out_channels * 7 * 7,  # 7×7 プール後
-        representation_size,
-        p=p_dropout,
+        backbone.out_channels * 7 * 7,  # 7×7 プーリング後の特徴量総数
+        representation_size,             # MLP 隠れ層サイズ
+        p_dropout                        # ドロップアウト率
     )
 
-    # 3) RPN のアンカー
+    # ── 4) RPN用アンカー設定 ──
     anchor_gen = AnchorGenerator(
-        sizes=((32, 64, 128, 256),), aspect_ratios=((0.5, 1.0, 2.0),)
+        sizes=((32, 64, 128, 256),),
+        aspect_ratios=((0.5, 1.0, 2.0),)
     )
 
-    # 4) Faster-RCNN 本体
+    # ── 5) Faster R-CNN モデル構築 ──
     model = FasterRCNN(
-        backbone,
+        backbone=backbone,
         num_classes=num_classes,
         rpn_anchor_generator=anchor_gen,
         box_head=box_head,
         image_mean=image_mean,
         image_std=image_std,
     )
+
     return model
+
+
 
 
 # ----------------------------- Helpers --------------------------------

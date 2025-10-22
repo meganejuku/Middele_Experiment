@@ -1,39 +1,113 @@
-# HSI(ハイパースペクトルイメージ)を使ったFaster R-CNNの実装
+# HSI Faster R-CNN
 
-## ファイルの説明
-- hsi_faster_rcnn.py
-`get_model`関数で、`torchvision.models.detection.FasterRCNN`をインポートし、そのbackbornのResNet50の1層目をHSIの入力サイズに合わせている。これによって、IMAGEnet-1000クラス分類で事前学習したモデルをそのまま利用しつつ、HSIで物体検出をできるようにしている。
-学習時はtrain_lossとvalid_loss,P(precision),R(recall),また、PとRを用いて計算されるF1値を1epochごとに出力する。
-加えて、HSIに対して推論を行う関数`visualize`も定義されている。これを実行して、test画像に対してバウンディングボックスを表示する。
-実行するには、コード中にコメントアウトされているように、ターミナルの中でtrain/predictのモードを選択し、データセットやハイパーパラメータを指示することで実行できる。
+ハイパースペクトル画像（HSI）に対応した Faster R-CNN を用いて、モバイルバッテリー（1 クラス）を検出する PyTorch プロジェクトです。学習・推論・評価がそれぞれ独立したスクリプトとして整理されています。
 
-- eval_pr.py
-モデルの評価を行う。p-rカーブを計算し、出力する。
+## 主なスクリプト
+- `hsi_faster_rcnn.py`  
+  EfficientNet-B3 をバックボーンにした Faster R-CNN の学習スクリプト。混合精度と学習曲線の保存に対応しています。
+- `inference.py`  
+  学習済みウェイトを用いて画像群へ推論を行い、検出結果を可視化します。
+- `eval_pr.py`  
+  mAP@0.50:0.95、mAP@0.50、混同行列、PR カーブを計算・出力します。
+- `utils.py`  
+  前処理や共通処理をまとめたユーティリティ（必要に応じて import されています）。
 
-- dataset
-train,valid,testの各ディレクトリ内に、Annotations,TIFFImages,JPGImagesというディレクトリがある。JPGImagesはアノテーションする際に使ったデータなので、今回は使用しない。よって、AnnotationsとTIFFImagesのみを使用する。
-Annotationsには、PASCAL VOC形式の、.xmlファイルでアノテーションが保存されている。
-TIFFImagesには、battery_train_100_000_103_snapshot_cube.tiffなどのHSIが保存されている。
+## 動作環境
+- Python 3.12 以上
+- PyTorch 2.7 / TorchVision 0.22 以降（CUDA 対応 GPU を推奨）
+- メモリ 16 GB 以上、GPU メモリ 8 GB 程度を推奨
 
-- runs
-実行結果を主に保存する。
-- models
-学習したモデルを保存する。
-- sample
-今回扱うHSIのデータのサンプルが入っている。自由に編集してもらって構いません。
+依存パッケージは `pyproject.toml` に記載しています。GPU を利用する場合は、事前に CUDA 対応の PyTorch を公式手順でインストールしてください。
 
-## データセット
-今回は、ゴミの中に混ざるモバイルバッテリーを検知する取り組みを行っている。
-ゴミのサンプル中のランダムな位置にモバイルバッテリーを1つだけ配置し、それを撮影することで、モバイルバッテリーの位置を検出する。
-撮影枚数は、train:valid:test = 400,100,10で、HSI(ハイパースペクトルイメージ)というデータになっている。
+## セットアップ
+1. 仮想環境の作成
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate      # Windows の場合: .venv\Scripts\activate
+   python -m pip install --upgrade pip
+   ```
+2. 依存関係のインストール
+   ```bash
+   pip install -e .
+   ```
+   もしくは `uv` を使用している場合は `uv sync` でも構いません。
 
-HSIのサイズは、(H, W, ch) = (275, 290, 51)であり、uint16で保存されているので、0-65535の値を持つ。また、拡張子は.tiffで、tifffileなどの専用のライブラリで読み込むことができる。
+## データセットの準備
+本リポジトリには学習用データは含まれていません。PASCAL VOC 形式のアノテーション（`.xml`）と HSI（`.tiff` など）を以下の構成で配置してください。
 
+```
+/path/to/dataset/
+  ├─ train/
+  │   ├─ Annotations/*.xml
+  │   └─ TIFFImages/*.tiff  # または images/*.tif, *.png など
+  ├─ val/
+  │   ├─ Annotations/*.xml
+  │   └─ TIFFImages/*.tiff
+  └─ test/
+      ├─ Annotations/*.xml
+      └─ TIFFImages/*.tiff
+```
 
-## 要望
-１．hsi_faster_rcnn.pyでは現在、学習と推論を行うような仕組みになっているが、自分としては学習と推論は別のファイルで行えるようにしたい(例えば、inference.pyなどで別に実装する、など)。
+- バンド数が 3 以外の HSI を想定していますが、RGB 画像も扱えます。
+- アノテーションのクラス名は `battery` を想定しています。必要に応じてスクリプト内のフィルタを変更してください。
+- `sample/` に小さなサンプルがあれば参考用に確認できます。
 
-２．学習部と推論部を分離した後、各.pyファイルに変なところ・致命的なバグのあるところがないかどうかを確認してほしい。
+## 学習
+```bash
+python hsi_faster_rcnn.py \
+  --data_root /path/to/dataset \
+  --epochs 20 \
+  --batch_size 2 \
+  --lr 5e-3 \
+  --save_path models/hsi_rcnn.pth
+```
 
-３．モデルの評価をする際、現在はp-rカーブを出力するのみだが、mAP50-95と、mAP50、true-falseとPositive-negativeの混合行列を出力するプログラムも出力するようにしてほしい(現在は物体検出で検出するのは1クラスで、物体と背景の2クラス分類なので、2*2の混合行列で表せると思います)。
+- `--data_root` は前述のデータセットルートを指定します。
+- 学習中のロスと指標は標準出力へ記録され、学習後に `runs/loss/` 以下へ学習曲線が保存されます。
+- `models/` ディレクトリは自動で作成され、学習済みウェイトが保存されます。
 
+## 推論
+```bash
+python inference.py \
+  --data_root /path/to/dataset \
+  --split test \
+  --weights models/hsi_rcnn.pth \
+  --score_thresh 0.5 \
+  --output_dir runs/predict
+```
+
+- 指定した `split` 内の全画像に対して推論を行い、`output_dir` に PNG 形式で可視化結果を保存します。
+- `--score_thresh` で検出スコアの下限値を調整できます。
+
+## 評価
+```bash
+python eval_pr.py \
+  --data_root /path/to/dataset \
+  --split val \
+  --weights models/hsi_rcnn.pth \
+  --score_thresh 0.5 \
+  --iou_thresh 0.5 \
+  --output_dir runs/eval
+```
+
+- コンソールに mAP を出力し、`output_dir` に PR カーブと混同行列を保存します。
+- `--font_size` を指定すると、出力図の注釈サイズをまとめて変更できます。
+
+## よくある質問
+- **CUDA が検出されない**: PyTorch をインストールする際に CUDA 対応ビルドを選択してください。
+- **データを読み込めない**: `TIFFImages` ではなく `images` といった別ディレクトリ名を使う場合は、スクリプトが自動検出します。想定外の構造になっていないかご確認ください。
+- **クラス数を変更したい**: `hsi_faster_rcnn.get_model` の `num_classes`、およびアノテーションのクラス名フィルタを合わせて変更してください。
+
+## リポジトリ構成（抜粋）
+- `hsi_faster_rcnn.py` … 学習用スクリプト
+- `inference.py` … 推論スクリプト
+- `eval_pr.py` … 評価スクリプト
+- `utils.py` … 前処理・共通関数
+- `dataset/` … データセット（空または未同梱）
+- `runs/` … 学習・推論・評価結果の出力先（実行時に生成）
+- `models/` … 学習済みモデルの保存先（実行時に生成）
+
+## ライセンス
+未設定です。必要に応じてライセンスファイルを追加してください。
+
+**注意：このREADMEはCodex CLIによって生成されたものです。一応確認はしていますが、実際の動作とは異なる可能性があります。**

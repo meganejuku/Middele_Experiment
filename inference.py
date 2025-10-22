@@ -17,13 +17,8 @@ import matplotlib.patches as patches
 from PIL import Image
 import tifffile
 import torch
-import torch.nn as nn
 import numpy as np
-from torch.utils.data import DataLoader
-import torchvision
-from torchvision.models import resnet50
-from torchvision.models._utils import IntermediateLayerGetter
-from torchvision.models.detection.rpn import AnchorGenerator
+
 
 # -------------------------------- Data --------------------------------
 
@@ -101,38 +96,7 @@ class HSIVOCDataset(torch.utils.data.Dataset):
         return img, target, img_id
 
 # ------------------------------- Model --------------------------------
-
-def get_model(num_classes=2, in_channels=51):
-    if in_channels == 3:
-        # ── RGB: ImageNet の ResNet50 をそのまま ──
-        backbone = resnet50(weights="IMAGENET1K_V2")
-        backbone = IntermediateLayerGetter(backbone, {"layer4": "0"})
-        backbone.out_channels = 2048
-        image_mean = [0.0] * 3
-        image_std  = [1.0] * 3
-    else:
-        # ── HSI: Conv1 を差し替え ──
-        base = resnet50(weights="IMAGENET1K_V2")
-        base.conv1 = nn.Conv2d(in_channels, 64, 7, 2, 3, bias=False)
-        nn.init.kaiming_normal_(base.conv1.weight, mode="fan_out", nonlinearity="relu")
-        backbone = IntermediateLayerGetter(base, {"layer4": "0"})
-        backbone.out_channels = 2048
-        image_mean = [0.0] * in_channels
-        image_std  = [1.0] * in_channels
-
-    anchor_gen = AnchorGenerator(
-        sizes=((32, 64, 128, 256),),
-        aspect_ratios=((0.5, 1.0, 2.0),)
-    )
-
-    model = torchvision.models.detection.FasterRCNN(
-        backbone,
-        num_classes=num_classes,
-        rpn_anchor_generator=anchor_gen,
-        image_mean=image_mean,
-        image_std=image_std
-    )
-    return model
+from hsi_faster_rcnn import get_model
 
 # --------------------------- Visualization -----------------------------
 
@@ -150,7 +114,7 @@ def visualize(img_tensor, boxes, scores, save_path):
         x1, y1, x2, y2 = box
         ax.add_patch(patches.Rectangle((x1, y1), x2 - x1, y2 - y1,
                                       fill=False, edgecolor="lime", linewidth=2))
-        ax.text(x1, y1, f"{sc:.2f}", color="yellow", fontsize=8,
+        ax.text(x1, y1, f"{sc:.2f}", color="yellow", fontsize=16,
                 bbox=dict(facecolor="black", alpha=0.3))
     ax.axis("off")
     save_path.parent.mkdir(parents=True, exist_ok=True)
